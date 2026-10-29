@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101923">
+  <title>QuakeLab — Physics & Structure Simulator</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/poly-decomp@0.3.0/build/decomp.min.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="QuakeLab home"><span class="brand-mark">Q</span><span>Quake<span class="brand-light">Lab</span></span></a>
+      <div class="topbar-caption">2D STRUCTURAL SIMULATOR</div>
+      <div class="topbar-status"><span class="status-dot"></span><span id="statusText">EDITOR PAUSED</span></div>
+    </header>
+
+    <section class="workspace">
+      <aside class="sidebar">
+        <div class="side-section">
+          <div class="section-title">BUILD</div>
+          <button class="tool-button selected" data-tool="select"><span class="tool-icon">↖</span><span>Select &amp; edit</span><kbd>V</kbd></button>
+          <button class="tool-button" data-tool="rectangle"><span class="tool-icon">▭</span><span>Rectangle</span></button>
+          <button class="tool-button" data-tool="circle"><span class="tool-icon">○</span><span>Circle</span></button>
+          <button class="tool-button" data-tool="polygon"><span class="tool-icon">⬡</span><span>Polygon</span></button>
+          <button class="tool-button" data-tool="star"><span class="tool-icon">☆</span><span>Star</span></button>
+          <button class="tool-button" data-tool="semicircle"><span class="tool-icon">◒</span><span>Half circle</span></button>
+          <button class="tool-button" data-tool="custom"><span class="tool-icon">✎</span><span>Custom polygon</span><kbd>P</kbd></button>
+          <button class="tool-button" data-tool="hinge"><span class="tool-icon">⊙</span><span>Hinge joint</span></button>
+          <button class="tool-button" data-tool="fixed"><span class="tool-icon">⛓</span><span>Fixed joint</span></button>
+          <button class="tool-button" data-tool="delete"><span class="tool-icon">⌫</span><span>Delete object</span></button>
+        </div>
+
+        <div class="side-section settings-section">
+          <div class="section-title">SHAPE SETTINGS</div>
+          <label class="setting-row"><span>Width</span><span><input id="widthInput" type="number" value="120" min="10" max="600"><i>px</i></span></label>
+          <label class="setting-row"><span>Height</span><span><input id="heightInput" type="number" value="70" min="10" max="600"><i>px</i></span></label>
+          <label class="setting-row"><span>Radius</span><span><input id="radiusInput" type="number" value="48" min="8" max="300"><i>px</i></span></label>
+          <label class="setting-row"><span>Sides / points</span><span><input id="sidesInput" type="number" value="6" min="3" max="16"></span></label>
+          <label class="setting-row"><span>Inner radius</span><span><input id="innerInput" type="number" value="22" min="4" max="300"><i>px</i></span></label>
+          <label class="setting-row"><span>Body type</span><select id="bodyTypeInput" aria-label="Body type"><option value="dynamic">Dynamic</option><option value="static">Static</option></select></label>
+          <label class="setting-row color-row"><span>Fill color</span><input id="colorInput" type="color" value="#42d6bd" aria-label="Fill color"></label>
+        </div>
+
+        <div class="side-section joint-section">
+          <div class="section-title">JOINTS</div>
+          <label class="check-row"><input id="breakToggle" type="checkbox" checked><span>Break on overload</span></label>
+          <label class="setting-row"><span>Breaking force</span><span><input id="breakForceInput" type="number" value="0.08" min="0.005" max="2" step="0.005"><i>N</i></span></label>
+          <p class="hint">Choose a joint tool, then click two shapes to connect them.</p>
+        </div>
+
+        <div class="sidebar-footer">
+          <span class="key-hint"><kbd>Ctrl</kbd> + <kbd>Z</kbd> Undo</span>
+          <span class="key-hint"><kbd>Enter</kbd> Finish polygon</span>
+        </div>
+      </aside>
+
+      <section class="stage">
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <button id="playButton" class="button button-primary"><span>▶</span> Start</button>
+            <button id="stepButton" class="button"><span>▷|</span> Step</button>
+            <button id="resetButton" class="button"><span>↺</span> Reset</button>
+          </div>
+          <div class="toolbar-divider"></div>
+          <div class="toolbar-group">
+            <button id="undoButton" class="button icon-button" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+            <button id="clearButton" class="button button-danger"><span>⌫</span> Clear</button>
+          </div>
+          <div class="toolbar-spacer"></div>
+          <div class="simulation-label"><span class="pulse-dot"></span><span id="runLabel">SIMULATION PAUSED</span></div>
+        </div>
+
+        <div class="canvas-wrap">
+          <canvas id="worldCanvas" aria-label="Physics simulator drawing canvas"></canvas>
+          <div class="canvas-instructions" id="canvasInstructions">Select a shape tool and click to add it. Drag objects to arrange your structure.</div>
+          <div class="coordinate-readout" id="coordinateReadout">X: 0 &nbsp; Y: 0</div>
+        </div>
+        <div class="bottom-bar">
+          <div class="quake-controls">
+            <div class="quake-heading"><span class="quake-icon">〰</span><span>EARTHQUAKE GENERATOR</span></div>
+            <label class="range-control"><span>Frequency <b id="frequencyValue">2.0 Hz</b></span><input id="frequencyInput" type="range" min="0.2" max="8" step="0.1" value="2"></label>
+            <label class="range-control"><span>Intensity <b id="intensityValue">35%</b></span><input id="intensityInput" type="range" min="0" max="100" step="1" value="35"></label>
+          </div>
+          <div class="legend">
+            <span class="legend-title">JOINT STRESS <b id="maxStress">0%</b></span>
+            <span class="legend-gradient"></span>
+            <span class="legend-labels"><span>LOW</span><span>HIGH</span></span>
+          </div>
+        </div>
+      </section>
+    </section>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </main>
+</body>
+</html>
