@@ -1156,7 +1156,7 @@
   }
   el("motorToggle").addEventListener("change", (event) => motorChange((motor) => { motor.enabled = event.target.checked; }));
   el("motorSpeedInput").addEventListener("change", (event) => {
-    const speed = readNumber("motorSpeedInput", 90, -360, 360);
+    const speed = readNumber("motorSpeedInput", 90, -5000, 5000);
     event.target.value = speed;
     motorChange((motor) => { motor.speed = speed; });
   });
