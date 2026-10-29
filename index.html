@@ -45,6 +45,19 @@
           <label class="setting-row color-row"><span>Fill color</span><input id="colorInput" type="color" value="#42d6bd" aria-label="Fill color"></label>
         </div>
 
+        <div class="side-section selection-section">
+          <div class="section-title">SELECTION</div>
+          <div class="button-row">
+            <button id="groupButton" class="button" disabled title="Select two or more shapes (Shift+click)">Group</button>
+            <button id="ungroupButton" class="button" disabled>Ungroup</button>
+          </div>
+          <button id="pivotButton" class="button wide-button" disabled>Set pivot point</button>
+          <label class="check-row"><input id="motorToggle" type="checkbox" disabled><span>Rotate (motor)</span></label>
+          <label class="setting-row"><span>Speed</span><span><input id="motorSpeedInput" type="number" value="90" min="-360" max="360" step="10" disabled><i>°/s</i></span></label>
+          <label class="setting-row"><span>Torque</span><span><input id="motorTorqueInput" type="number" value="40" min="1" max="100" disabled><i>N·m</i></span></label>
+          <p class="hint" id="selectionHint">Shift+click to select several shapes, then group them. Negative speed reverses the rotation.</p>
+        </div>
+
         <div class="side-section joint-section">
           <div class="section-title">JOINTS</div>
           <label class="check-row"><input id="breakToggle" type="checkbox" checked><span>Break on overload</span></label>

@@ -20,6 +20,8 @@
   let accumulator = 0;
   let activeTool = "select";
   let selectedBody = null;
+  const multiSel = new Set();
+  let pivotMode = false;
   let dragState = null;
   let jointStart = null;
   let customPoints = [];
@@ -74,7 +76,9 @@
       id: body.plugin.simId,
       position: { x: body.position.x, y: body.position.y },
       angle: body.angle,
-      vertices: body.plugin.outline
+      group: body.plugin.group ? body.plugin.group.map((m) => ({ color: m.color, outline: m.outline.map((p) => ({ ...p })) })) : null,
+      motor: { ...motorOf(body) },
+      vertices: body.plugin.group ? [] : body.plugin.outline
         ? body.plugin.outline.map((point) => ({ ...point }))
         : body.vertices.map((vertex) => {
           const dx = vertex.x - body.position.x;
@@ -104,11 +108,12 @@
     joints.clear();
     ground = null;
     for (const saved of state.bodies) {
-      const body = polygonBody(saved.vertices, saved.position.x, saved.position.y, saved.color);
+      const body = buildSavedBody(saved);
       if (!body) continue;
       body.render.strokeStyle = "#b9fff0";
       body.render.lineWidth = 1.5;
       body.plugin.simId = saved.id;
+      body.plugin.motor = { ...saved.motor };
       body.plugin.initialPosition = saved.initialPosition;
       body.plugin.initialAngle = saved.initialAngle;
       Body.setAngle(body, saved.angle);
@@ -128,7 +133,7 @@
     nextJointId = state.nextJointId;
     brokenJoints = [];
     bodyStress.clear();
-    selectedBody = null;
+    setSelection(null);
     jointStart = null;
     accumulator = 0;
   }
@@ -197,6 +202,225 @@
     }));
   }
 
+  // Every shape of a body as world polygons (a group has several, anything else has one).
+  function worldShapes(body) {
+    if (body.plugin.group) return body.plugin.group.map((m) => ({ color: m.color, outline: m.outline.map((p) => anchorWorld(body, p)) }));
+    return [{ color: body.render.fillStyle, outline: worldOutline(body).map((p) => ({ x: p.x, y: p.y })) }];
+  }
+
+  function hitsBody(body, point) {
+    return worldShapes(body).some((shape) => pointInPolygon(shape.outline, point));
+  }
+
+  function motorOf(body) {
+    if (!body.plugin.motor) body.plugin.motor = { enabled: false, speed: 90, torque: 40 };
+    return body.plugin.motor;
+  }
+
+  // A group is one compound body: every member shape becomes rigid parts of it,
+  // while the member outlines are kept so concave shapes still draw correctly.
+  function groupBody(members) {
+    const leaves = [];
+    for (const member of members) {
+      const c = Vertices.centre(member.outline);
+      const relative = member.outline.map((p) => ({ x: p.x - c.x, y: p.y - c.y }));
+      const temp = Bodies.fromVertices(c.x, c.y, [relative], { friction: 0.75, restitution: 0.05 }, true);
+      if (!temp) return null;
+      leaves.push(...(temp.parts.length > 1 ? temp.parts.slice(1) : [temp]));
+    }
+    const body = Body.create({ parts: leaves, friction: 0.75, restitution: 0.05, render: { fillStyle: members[0].color } });
+    body.plugin.group = members.map((m) => ({ color: m.color, outline: m.outline.map((p) => localPoint(body, p)) }));
+    return body;
+  }
+
+  // Rebuilds a body from saved data; the saved position is the pivot, which may differ from the centroid.
+  function buildSavedBody(saved) {
+    let body;
+    if (saved.group) {
+      const members = saved.group.map((m) => ({
+        color: m.color,
+        outline: m.outline.map((p) => ({ x: saved.position.x + p.x, y: saved.position.y + p.y }))
+      }));
+      body = groupBody(members);
+    } else {
+      const c = Vertices.centre(saved.vertices);
+      body = polygonBody(saved.vertices, saved.position.x + c.x, saved.position.y + c.y, saved.color);
+    }
+    if (body) movePivot(body, saved.position);
+    return body;
+  }
+
+  // Moves the point a body rotates about without moving its geometry.
+  function movePivot(body, world) {
+    const local = localPoint(body, world);
+    const com = body.plugin.com || { x: 0, y: 0 };
+    const newCom = { x: com.x - local.x, y: com.y - local.y };
+    // Parallel-axis shift so the inertia matches rotation about the new pivot.
+    const extra = (newCom.x * newCom.x + newCom.y * newCom.y) - (com.x * com.x + com.y * com.y);
+    Body.setCentre(body, world, false);
+    const shift = (p) => ({ x: p.x - local.x, y: p.y - local.y });
+    if (body.plugin.outline) body.plugin.outline = body.plugin.outline.map(shift);
+    if (body.plugin.group) body.plugin.group = body.plugin.group.map((m) => ({ color: m.color, outline: m.outline.map(shift) }));
+    body.plugin.com = newCom;
+    if (body.isStatic) {
+      if (body._original) body._original.inertia += body._original.mass * extra;
+    } else {
+      Body.setInertia(body, body.inertia + body.mass * extra);
+    }
+    body.plugin.initialPosition = { x: body.position.x, y: body.position.y };
+  }
+
+  function selectedBodies() {
+    if (multiSel.size >= 2) return [...multiSel];
+    return selectedBody ? [selectedBody] : [];
+  }
+
+  function isSelected(body) {
+    return selectedBody === body || multiSel.has(body);
+  }
+
+  function applySelectionSet(set) {
+    pivotMode = false;
+    multiSel.clear();
+    if (set.size >= 2) {
+      set.forEach((body) => multiSel.add(body));
+      selectedBody = null;
+    } else {
+      selectedBody = set.size ? [...set][0] : null;
+    }
+    syncInspector();
+  }
+
+  function setSelection(body) {
+    applySelectionSet(new Set(body ? [body] : []));
+  }
+
+  function toggleSelection(body) {
+    if (!body) return;
+    const set = new Set(selectedBodies());
+    if (set.has(body)) set.delete(body); else set.add(body);
+    applySelectionSet(set);
+  }
+
+  function syncInspector() {
+    updateInspectorState();
+    const first = selectedBodies()[0];
+    if (!first) return;
+    el("bodyTypeInput").value = first.isStatic ? "static" : "dynamic";
+    const motor = motorOf(first);
+    el("motorToggle").checked = motor.enabled;
+    el("motorSpeedInput").value = motor.speed;
+    el("motorTorqueInput").value = motor.torque;
+  }
+
+  function updateInspectorState() {
+    const list = selectedBodies();
+    const single = list.length === 1 ? list[0] : null;
+    const connected = single && [...joints.values()].some((joint) => joint.bodyA === single || joint.bodyB === single);
+    if (pivotMode && (running || !single || connected)) pivotMode = false;
+    el("groupButton").disabled = running || multiSel.size < 2;
+    el("ungroupButton").disabled = running || !single || !single.plugin.group;
+    el("pivotButton").disabled = running || !single || !!connected;
+    el("pivotButton").title = connected ? "Not available for objects connected by a joint" : "";
+    el("pivotButton").classList.toggle("active", pivotMode);
+    el("pivotButton").textContent = pivotMode ? "Click the new pivot point…" : "Set pivot point";
+    for (const id of ["motorToggle", "motorSpeedInput", "motorTorqueInput"]) el(id).disabled = list.length === 0;
+  }
+
+  function registerBody(body, color) {
+    body.plugin.simId = nextBodyId++;
+    body.plugin.initialPosition = { x: body.position.x, y: body.position.y };
+    body.plugin.initialAngle = body.angle;
+    body.render.fillStyle = color;
+    body.render.strokeStyle = "#b9fff0";
+    body.render.lineWidth = 1.5;
+    Composite.add(engine.world, body);
+    bodies.set(body.plugin.simId, body);
+  }
+
+  function groupSelection() {
+    const list = selectedBodies();
+    if (list.length < 2 || running) return;
+    const body = groupBody(list.flatMap(worldShapes));
+    if (!body) {
+      showToast("These shapes could not be grouped.");
+      return;
+    }
+    saveUndo();
+    const members = new Set(list);
+    for (const [id, joint] of joints) {
+      const aIn = members.has(joint.bodyA);
+      const bIn = members.has(joint.bodyB);
+      if (!aIn && !bIn) continue;
+      removeConstraints(joint);
+      if (aIn && bIn) {
+        joints.delete(id);
+        continue;
+      }
+      if (aIn) {
+        const pivot = anchorWorld(joint.bodyA, joint.pointA);
+        joint.bodyA = body;
+        joint.pointA = localPoint(body, pivot);
+      } else {
+        joint.bodyB = body;
+      }
+    }
+    for (const member of list) {
+      Composite.remove(engine.world, member);
+      bodies.delete(member.plugin.simId);
+    }
+    registerBody(body, body.render.fillStyle);
+    if (list.some((member) => member.isStatic)) Body.setStatic(body, true);
+    for (const joint of joints.values()) if (joint.bodyA === body || joint.bodyB === body) rebuildConstraints(joint);
+    setSelection(body);
+    showToast("Shapes grouped");
+  }
+
+  function ungroupSelection() {
+    const body = selectedBody;
+    if (!body || !body.plugin.group || running) return;
+    saveUndo();
+    const created = worldShapes(body).map((shape) => {
+      const c = Vertices.centre(shape.outline);
+      const part = polygonBody(shape.outline, c.x, c.y, shape.color);
+      if (!part) return null;
+      registerBody(part, shape.color);
+      if (body.isStatic) Body.setStatic(part, true);
+      return part;
+    }).filter(Boolean);
+    if (!created.length) return;
+    for (const [id, joint] of joints) {
+      if (joint.bodyA !== body && joint.bodyB !== body) continue;
+      const pivot = anchorWorld(joint.bodyA, joint.pointA);
+      const owner = created.find((part) => hitsBody(part, pivot))
+        || created.reduce((best, part) => (Math.hypot(part.position.x - pivot.x, part.position.y - pivot.y) < Math.hypot(best.position.x - pivot.x, best.position.y - pivot.y) ? part : best));
+      removeConstraints(joint);
+      if (joint.bodyA === body) {
+        joint.bodyA = owner;
+        joint.pointA = localPoint(owner, pivot);
+      } else {
+        joint.bodyB = owner;
+      }
+      rebuildConstraints(joint);
+    }
+    Composite.remove(engine.world, body);
+    bodies.delete(body.plugin.simId);
+    applySelectionSet(new Set(created));
+    showToast("Group split into shapes");
+  }
+
+  function applyPivot(point) {
+    const body = selectedBody;
+    if (!body || !hitsBody(body, point)) {
+      showToast("Click inside the object to set its pivot.");
+      return;
+    }
+    saveUndo();
+    movePivot(body, point);
+    pivotMode = false;
+    showToast("Pivot point updated");
+  }
+
   function segmentsCross(a, b, c, d) {
     const side = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
     return side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0;
@@ -260,7 +484,7 @@
     }
     if (body) {
       addBody(body);
-      selectedBody = body;
+      setSelection(body);
       el("canvasInstructions").hidden = true;
     }
   }
@@ -285,7 +509,7 @@
     const body = bodyFromPoints(points, center.x, center.y);
     if (body) {
       addBody(body);
-      selectedBody = body;
+      setSelection(body);
       el("canvasInstructions").hidden = true;
     }
     customPoints = [];
@@ -367,7 +591,7 @@
 
   function bodyAt(point, exclude = null) {
     for (const body of [...bodies.values()].reverse()) {
-      if (body !== exclude && pointInPolygon(worldOutline(body), point)) return body;
+      if (body !== exclude && hitsBody(body, point)) return body;
     }
     return null;
   }
@@ -383,9 +607,9 @@
     return inside;
   }
 
-  function deleteBody(body) {
+  function deleteBody(body, skipUndo = false) {
     if (!body) return;
-    saveUndo();
+    if (!skipUndo) saveUndo();
     for (const [id, joint] of joints) {
       if (joint.bodyA === body || joint.bodyB === body) {
         removeConstraints(joint);
@@ -394,7 +618,11 @@
     }
     Composite.remove(engine.world, body);
     bodies.delete(body.plugin.simId);
-    if (selectedBody === body) selectedBody = null;
+    if (selectedBody === body || multiSel.has(body)) {
+      const rest = new Set(selectedBodies());
+      rest.delete(body);
+      applySelectionSet(rest);
+    }
     if (bodies.size === 0) el("canvasInstructions").hidden = false;
   }
 
@@ -414,6 +642,10 @@
     }
     if (["rectangle", "circle", "polygon", "star", "semicircle"].includes(activeTool)) {
       createShape(activeTool, point);
+      return;
+    }
+    if (activeTool === "select" && pivotMode) {
+      applyPivot(point);
       return;
     }
     if (activeTool === "select" && selectedBody) {
@@ -441,9 +673,21 @@
       }
       return;
     }
-    selectedBody = hit;
+    if (event.shiftKey) {
+      toggleSelection(hit);
+      return;
+    }
+    if (hit && multiSel.has(hit)) {
+      saveUndo();
+      dragState = {
+        type: "move",
+        body: hit,
+        items: [...multiSel].map((body) => ({ body, offset: { x: point.x - body.position.x, y: point.y - body.position.y } }))
+      };
+      return;
+    }
+    setSelection(hit);
     if (!hit) return;
-    el("bodyTypeInput").value = hit.isStatic ? "static" : "dynamic";
     saveUndo();
     const bounds = hit.bounds;
     const corners = [
@@ -469,7 +713,7 @@
           lastScale: { x: 1, y: 1 }
         };
       } else {
-        dragState = { type: "move", body: hit, offset: { x: point.x - hit.position.x, y: point.y - hit.position.y } };
+        dragState = { type: "move", body: hit, items: [{ body: hit, offset: { x: point.x - hit.position.x, y: point.y - hit.position.y } }] };
       }
     }
   }
@@ -481,7 +725,7 @@
     if (!dragState || running) return;
     const body = dragState.body;
     if (dragState.type === "move") {
-      Body.setPosition(body, { x: point.x - dragState.offset.x, y: point.y - dragState.offset.y });
+      for (const item of dragState.items) Body.setPosition(item.body, { x: point.x - item.offset.x, y: point.y - item.offset.y });
     } else if (dragState.type === "rotate") {
       Body.setAngle(body, Math.atan2(point.y - body.position.y, point.x - body.position.x) - dragState.startAngle);
     } else if (dragState.type === "scale") {
@@ -492,6 +736,10 @@
       Body.scale(body, factor, factor);
       dragState.lastScale = { x: target, y: target };
       if (body.plugin.outline) body.plugin.outline = body.plugin.outline.map((p) => ({ x: p.x * factor, y: p.y * factor }));
+      if (body.plugin.group) {
+        body.plugin.group = body.plugin.group.map((m) => ({ color: m.color, outline: m.outline.map((p) => ({ x: p.x * factor, y: p.y * factor })) }));
+      }
+      if (body.plugin.com) body.plugin.com = { x: body.plugin.com.x * factor, y: body.plugin.com.y * factor };
       for (const joint of joints.values()) {
         if (joint.bodyA === body) joint.pointA = { x: joint.pointA.x * factor, y: joint.pointA.y * factor };
         if (joint.bodyB === body) joint.pointB = { x: joint.pointB.x * factor, y: joint.pointB.y * factor };
@@ -501,15 +749,17 @@
 
   function pointerUp() {
     if (dragState) {
-      const body = dragState.body;
-      body.plugin.initialPosition = { x: body.position.x, y: body.position.y };
-      body.plugin.initialAngle = body.angle;
-      // The moved body keeps its pivot; the other body is re-pinned at that world point.
+      const moved = new Set(dragState.items ? dragState.items.map((item) => item.body) : [dragState.body]);
+      for (const body of moved) {
+        body.plugin.initialPosition = { x: body.position.x, y: body.position.y };
+        body.plugin.initialAngle = body.angle;
+      }
+      // A moved body keeps its pivot; the other body is re-pinned at that world point.
       for (const joint of joints.values()) {
-        if (joint.bodyA === body) {
+        if (moved.has(joint.bodyA)) {
           rebuildConstraints(joint);
-        } else if (joint.bodyB === body) {
-          joint.pointA = localPoint(joint.bodyA, anchorWorld(body, joint.pointB));
+        } else if (moved.has(joint.bodyB)) {
+          joint.pointA = localPoint(joint.bodyA, anchorWorld(joint.bodyB, joint.pointB));
           rebuildConstraints(joint);
         }
       }
@@ -595,9 +845,28 @@
     el("maxStress").textContent = `${Math.round(peak * 100)}%`;
   }
 
+  function applyMotors() {
+    const dt = fixedStep / 1000;
+    for (const body of bodies.values()) {
+      const motor = body.plugin.motor;
+      if (!motor || !motor.enabled) continue;
+      const target = motor.speed * Math.PI / 180 * dt;
+      if (body.isStatic) {
+        // Static bodies have no torque response, so they are turned directly.
+        Body.setAngle(body, body.angle + target);
+        continue;
+      }
+      // Torque that would reach the target speed this step, capped by the motor's strength.
+      const needed = (target - (body.angle - body.anglePrev)) / (body.inverseInertia * fixedStep * fixedStep);
+      const maxTorque = motor.torque * 0.1;
+      body.torque += limit(needed, -maxTorque, maxTorque);
+    }
+  }
+
   function updatePhysics(delta) {
     Engine.update(engine, delta);
     updateStress();
+    applyMotors();
     const intensity = Number(el("intensityInput").value);
     const frequency = Number(el("frequencyInput").value);
     const time = performance.now() / 1000;
@@ -614,17 +883,57 @@
   }
 
   function drawBody(body) {
-    const vertices = worldOutline(body);
-    if (!vertices.length) return;
+    const stressed = bodyStress.has(body);
+    for (const shape of worldShapes(body)) {
+      const vertices = shape.outline;
+      if (!vertices.length) continue;
+      ctx.beginPath();
+      ctx.moveTo(vertices[0].x, vertices[0].y);
+      for (let i = 1; i < vertices.length; i++) ctx.lineTo(vertices[i].x, vertices[i].y);
+      ctx.closePath();
+      ctx.fillStyle = shape.color || "#42d6bd";
+      ctx.fill();
+      ctx.lineWidth = stressed ? 3 : isSelected(body) ? 2 : 1;
+      ctx.strokeStyle = stressed ? stressColor(bodyStress.get(body)) : isSelected(body) ? "#f0fff9" : (body.isStatic ? "#3d5866" : "#b9fff0");
+      ctx.stroke();
+    }
+    const motor = body.plugin.motor;
+    if (motor && motor.enabled) drawMotor(body, motor);
+    if (isSelected(body) && !running) {
+      ctx.beginPath();
+      ctx.moveTo(body.position.x - 5, body.position.y);
+      ctx.lineTo(body.position.x + 5, body.position.y);
+      ctx.moveTo(body.position.x, body.position.y - 5);
+      ctx.lineTo(body.position.x, body.position.y + 5);
+      ctx.strokeStyle = "#ffcf69";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // Circular arrow at the pivot; its direction shows the sign of the motor speed.
+  function drawMotor(body, motor) {
+    const { x, y } = body.position;
+    const dir = motor.speed >= 0 ? 1 : -1;
+    const start = body.angle - dir * 2.2;
+    const end = body.angle + dir * 2.2;
     ctx.beginPath();
-    ctx.moveTo(vertices[0].x, vertices[0].y);
-    for (let i = 1; i < vertices.length; i++) ctx.lineTo(vertices[i].x, vertices[i].y);
-    ctx.closePath();
-    ctx.fillStyle = body.render.fillStyle || "#42d6bd";
-    ctx.fill();
-    ctx.lineWidth = bodyStress.has(body) ? 3 : selectedBody === body ? 2 : 1;
-    ctx.strokeStyle = bodyStress.has(body) ? stressColor(bodyStress.get(body)) : selectedBody === body ? "#f0fff9" : (body.isStatic ? "#3d5866" : "#b9fff0");
+    ctx.arc(x, y, 14, start, end, dir < 0);
+    ctx.strokeStyle = "#13212b";
+    ctx.lineWidth = 4;
     ctx.stroke();
+    ctx.strokeStyle = "#ffcf69";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    const tip = { x: x + Math.cos(end) * 14, y: y + Math.sin(end) * 14 };
+    const tangent = end + dir * Math.PI / 2;
+    ctx.beginPath();
+    ctx.moveTo(tip.x + Math.cos(tangent) * 6, tip.y + Math.sin(tangent) * 6);
+    ctx.lineTo(tip.x + Math.cos(tangent + 2.5) * 6, tip.y + Math.sin(tangent + 2.5) * 6);
+    ctx.lineTo(tip.x + Math.cos(tangent - 2.5) * 6, tip.y + Math.sin(tangent - 2.5) * 6);
+    ctx.closePath();
+    ctx.fillStyle = "#ffcf69";
+    ctx.fill();
   }
 
   function drawJoint(joint) {
@@ -665,7 +974,22 @@
   }
 
   function drawSelection() {
-    if (!selectedBody || running) return;
+    if (running) return;
+    if (multiSel.size >= 2) {
+      const all = [...multiSel].map((body) => body.bounds);
+      const x0 = Math.min(...all.map((b) => b.min.x));
+      const y0 = Math.min(...all.map((b) => b.min.y));
+      const x1 = Math.max(...all.map((b) => b.max.x));
+      const y1 = Math.max(...all.map((b) => b.max.y));
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = "#ffcf69cc";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x0 - 4, y0 - 4, x1 - x0 + 8, y1 - y0 + 8);
+      ctx.restore();
+      return;
+    }
+    if (!selectedBody) return;
     const bounds = selectedBody.bounds;
     const x = bounds.min.x;
     const y = bounds.min.y;
@@ -756,6 +1080,7 @@
       });
     }
     drawSelection();
+    updateInspectorState();
     requestAnimationFrame(render);
   }
 
@@ -769,7 +1094,7 @@
     joints.clear();
     brokenJoints = [];
     bodyStress.clear();
-    selectedBody = null;
+    setSelection(null);
     customPoints = [];
     jointStart = null;
     el("canvasInstructions").hidden = false;
@@ -807,10 +1132,38 @@
     }
   });
   el("bodyTypeInput").addEventListener("change", (event) => {
-    if (!selectedBody || running) return;
+    const list = selectedBodies();
+    if (!list.length || running) return;
     saveUndo();
-    Body.setStatic(selectedBody, event.target.value === "static");
-    selectedBody.isSleeping = false;
+    for (const body of list) {
+      Body.setStatic(body, event.target.value === "static");
+      body.isSleeping = false;
+    }
+  });
+  el("groupButton").addEventListener("click", groupSelection);
+  el("ungroupButton").addEventListener("click", ungroupSelection);
+  el("pivotButton").addEventListener("click", () => {
+    if (el("pivotButton").disabled) return;
+    setTool("select");
+    pivotMode = !pivotMode;
+    if (pivotMode) showToast("Click inside the object to set its pivot point");
+  });
+  function motorChange(apply) {
+    const list = selectedBodies();
+    if (!list.length) return;
+    saveUndo();
+    for (const body of list) apply(motorOf(body));
+  }
+  el("motorToggle").addEventListener("change", (event) => motorChange((motor) => { motor.enabled = event.target.checked; }));
+  el("motorSpeedInput").addEventListener("change", (event) => {
+    const speed = readNumber("motorSpeedInput", 90, -360, 360);
+    event.target.value = speed;
+    motorChange((motor) => { motor.speed = speed; });
+  });
+  el("motorTorqueInput").addEventListener("change", (event) => {
+    const torque = readNumber("motorTorqueInput", 40, 1, 100);
+    event.target.value = torque;
+    motorChange((motor) => { motor.torque = torque; });
   });
   canvas.addEventListener("click", canvasClick);
   el("playButton").addEventListener("click", () => setRunning(!running));
@@ -835,6 +1188,13 @@
     } else if (event.key === "Escape") {
       customPoints = [];
       jointStart = null;
+      pivotMode = false;
+    } else if ((event.key === "Delete" || event.key === "Backspace") && !running && !/INPUT|SELECT|TEXTAREA/.test(event.target.tagName)) {
+      const list = selectedBodies();
+      if (!list.length) return;
+      event.preventDefault();
+      saveUndo();
+      list.forEach((body) => deleteBody(body, true));
     }
   });
   window.addEventListener("resize", resize);
